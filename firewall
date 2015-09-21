@@ -1,0 +1,443 @@
+#!/bin/bash
+#
+# Shell Script - Firewall
+# =======================
+# Autor:- Philipe Alves
+#
+ 
+iptables=/sbin/iptables
+ 
+module[0]="iptable_filter"
+module[1]="iptable_nat"
+module[2]="iptable_mangle"
+#module[3]="ip_conntrack"
+#module[4]="ip_conntrack_ftp"
+ 
+for ((n=0;$n<=2;n++)); do
+    if [ "`lsmod | grep ${module[$n]}`" = "" ]; then
+        /sbin/modprobe ${module[$n]}
+        echo "Módulo ${module[$n]} carregado."
+    fi
+done
+ 
+. /lib/lsb/init-functions
+
+# Servidor
+server=192.168.0.1
+ 
+# IP da Rede
+network=192.168.0.0/24
+ 
+# Interface da Rede Local - LAN
+ilan=eth1
+ 
+# Interface da Rede Externa - Internet
+inet=eth0
+
+# Interface da Red VPN - OpenVPN
+itun=tun0
+
+# Removendo regras
+$iptables -F
+$iptables -t nat -F
+$iptables -t mangle -F
+ 
+# Apagando chains
+$iptables -X
+$iptables -t nat -X
+$iptables -t mangle -X
+ 
+# Zerando contadores
+$iptables -Z
+$iptables -t nat -Z
+$iptables -t mangle -Z
+ 
+# Mascaramento
+$iptables -t nat -A POSTROUTING -o $inet -j MASQUERADE
+
+# Caixa Economica Federal
+$iptables -t nat -I PREROUTING -d 200.201.160.0/20 -j RETURN 
+$iptables -t nat -I POSTROUTING -d 200.201.160.0/20 -j MASQUERADE 
+$iptables -t filter -I FORWARD -d 200.201.160.0/20 -j ACCEPT
+
+$iptables -t filter -I FORWARD -d 200.192.173.0/20 -j ACCEPT
+
+$iptables -t nat -I PREROUTING -d 74.86.6.204 -j RETURN
+$iptables -t nat -I POSTROUTING -d 74.86.6.204 -j MASQUERADE
+$iptables -t filter -I FORWARD -d 74.86.6.204 -j ACCEPT
+
+# Meio Ambiente
+$iptables -A FORWARD -i $ilan -s 200.198.57.37 -j ACCEPT
+
+# OpenVPN
+$iptables -A INPUT -i $itun -j ACCEPT
+$iptables -A FORWARD -i $itun -j ACCEPT
+
+# Terminal Service
+#$iptables -A INPUT -p tcp --dport 3389 -j ACCEPT
+#$iptables -t nat -A PREROUTING -i $inet -p tcp --dport 3389 -j DNAT --to-destination 192.168.0.6:3389
+$iptables -t nat -A PREROUTING -i $inet -p tcp --dport 3389 -j DNAT --to-destination 192.168.0.14:3389
+$iptables -A FORWARD -p tcp --dport 3389 -j ACCEPT
+
+$iptables -t nat -A PREROUTING -i $inet -p udp --dport 1194 -j DNAT --to-destination 192.168.0.1:1194
+$iptables -A FORWARD -p udp --dport 1194 -j ACCEPT
+
+#$iptables -A FORWARD -i tun0 -s 10.15.0.0/24 -d 192.168.0.0/24 -p tcp -m tcp --dport 3389 -j ACCEPT
+
+# Proxy Transparente
+$iptables -I INPUT -s $network -p tcp --dport 3128 -j ACCEPT
+$iptables -t filter -A INPUT -i $ilan -j ACCEPT
+$iptables -t filter -A INPUT -i lo -j ACCEPT
+$iptables -t nat -A PREROUTING -i $ilan -p tcp --dport 80 -j REDIRECT --to-port 3128
+
+# Proxy Wifi
+#$iptables -I INPUT -s 192.168.1.0/24 -p tcp --dport 3128 -j ACCEPT
+#$iptables -t filter -A INPUT -i $iwifi -j ACCEPT
+#$iptables -t nat -A PREROUTING -i $iwifi -p tcp --dport 80 -j REDIRECT --to-port 3128
+
+# Bloqueio de MSN
+#$iptables -A FORWARD -s $network -p tcp --dport 1863 -j DROP
+
+# Ativando o redirecionamento de pacotes
+echo 1 > /proc/sys/net/ipv4/ip_forward
+ 
+do_start () {
+ 
+    # Política
+    $iptables -P INPUT DROP
+    $iptables -P OUTPUT ACCEPT
+    $iptables -P FORWARD DROP
+ 
+    # Manter Conexões Estabelecidas
+    $iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    $iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+ 
+    ########### PROTEÃÃES ###########
+ 
+    i=/proc/sys/net/ipv4
+#    echo 1 > $i/ipv4/tcp_syncookies
+    echo 1 > $i/icmp_echo_ignore_broadcasts
+    echo 1 > $i/icmp_ignore_bogus_error_responses
+ 
+    for i in /proc/sys/net/ipv4/conf/*; do
+        echo 0 > $i/accept_redirects
+        echo 0 > $i/accept_source_route
+        echo 1 > $i/log_martians
+        echo 1 > $i/rp_filter
+    done
+ 
+    # Proteção contra Ataques
+    $iptables -A INPUT -m state --state INVALID -j DROP
+ 
+    # Proteção contra os "Ping of Death"
+    $iptables -A INPUT -i $inet -p icmp --icmp-type 8 -m limit --limit 5/m -j DROP
+    $iptables -A INPUT -i $inet -p icmp --icmp-type 0 -j ACCEPT
+    $iptables -A INPUT -i $ilan -p icmp -j ACCEPT
+
+    # Proteção contra Port Scanner
+    $iptables -A INPUT -p tcp --tcp-flags SYN,ACK,FIN,RST RST -m limit --limit 5/m -j ACCEPT
+ 
+    # Liberando o Tráfego na Interface loopback
+    $iptables -A INPUT -i lo -j ACCEPT
+ 
+    ########### SERVIDORES ###########
+ 
+    # Apache - Servidor Web
+    #$iptables -A INPUT -p tcp -m multiport --dports 80,443 -j ACCEPT
+ 
+    # Apache TomCat - Servidor Web
+    #$iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
+ 
+    # Bind - Servidor DNS
+    #$iptables -A INPUT -p udp --dport 53 -j ACCEPT
+ 
+    # DanGuardian - Servidor Proxy
+    #$iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
+ 
+    # ProFTP - Servidor FTP
+    $iptables -A INPUT -p tcp --dport 21 -j ACCEPT
+
+    $iptables -A INPUT -p udp --dport 1194 -j ACCEPT
+    $iptables -A OUTPUT -p udp --dport 1194 -j ACCEPT
+    $iptables -A INPUT -p tcp -m multiport --dports 49152:49162 -j ACCEPT
+ 
+    # Postfix - Servidor de E-mail
+    #$iptables -A INPUT -i $ilan -p tcp -m multiport --dports 25,110 -j ACCEPT
+    #$iptables -A INPUT -i $ilan -p tcp -m multiport --dports 465,995 -j ACCEPT
+    #$iptables -A INPUT -i $ilan -p tcp --sport 25 -j ACCEPT
+ 
+    # PostgreSQL - Servidor Postgresql
+    #$iptables -A INPUT -i $ilan -p tcp --dport 5432 -j ACCEPT
+ 
+    # SSH - Servidor SSH
+    $iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --update --seconds 300 --hitcount 3 -j DROP
+    $iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --set
+    $iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+ 
+    # VNC - Servidor de Acesso Remoto
+    $iptables -A INPUT -p tcp --dport 5900 -j ACCEPT
+ 
+    ############# PROTOCOLOS E SERVIÃOS #############
+ 
+    # AIM
+    #$iptables -A INPUT -i $inet -p tcp --sport 5190 -j ACCEPT
+    #$iptables -A FORWARD -i $inet -p tcp --sport 5190 -j ACCEPT
+    #$iptables -A FORWARD -o $inet -p tcp --dport 5190 -j ACCEPT
+     
+    # DNS - Serviço de Nomes de Dominios
+    $iptables -A INPUT -p tcp -m multiport --sports 53,5353 -j ACCEPT
+    $iptables -A INPUT -p udp -m multiport --sports 53,5353 -j ACCEPT
+    $iptables -A FORWARD -p tcp -m multiport --sports 53,5353 -j ACCEPT
+    $iptables -A FORWARD -p udp -m multiport --sports 53,5353 -j ACCEPT
+    $iptables -A FORWARD -p tcp -m multiport --dports 53,5353 -j ACCEPT
+    $iptables -A FORWARD -p udp -m multiport --dports 53,5353 -j ACCEPT
+ 
+    # FTP - Protocolo de Transferência de Arquivo
+    $iptables -A INPUT -i $inet -p tcp --sport 21 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 21 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 21 -j ACCEPT
+
+    $iptables -A FORWARD -p tcp -s $network -d $server --dport 21 -j ACCEPT
+
+    $iptables -A INPUT -i $ilan -p tcp --sport 21 -j ACCEPT
+    $iptables -A FORWARD -i $ilan -p tcp --sport 21 -j ACCEPT
+    $iptables -A FORWARD -o $ilan -p tcp --dport 21 -j ACCEPT
+
+    #$iptables -A INPUT -i $ilan -p tcp --sport 1194 -j ACCEPT
+    #$iptables -A FORWARD -i $ilan -p tcp --sport 1194 -j ACCEPT
+    #$iptables -A FORWARD -o $ilan -p tcp --dport 1194 -j ACCEPT
+
+ #   $iptables -A INPUT -i $inet -p udp --sport 1194 -j ACCEPT
+ #   $iptables -A FORWARD -i $inet -p udp --sport 1194 -j ACCEPT
+ #   $iptables -A FORWARD -o $inet -p udp --dport 1194 -j ACCEPT
+ 
+    # HTTP - Protocolo de Transferência de Hypertext
+    $iptables -A INPUT -i $inet -p tcp -m multiport --sports 80,8080 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp -m multiport --sports 80,8080 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp -m multiport --dports 80,8080 -j ACCEPT
+
+    # HTTPS - Protocolo de Transferência de Hypertext Seguro
+    $iptables -A INPUT -i $inet -p tcp --sport 443 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 443 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 443 -j ACCEPT
+ 
+    # IAPP - Protocolo de Ponto de Acesso
+    #$iptables -A INPUT -i $ilan -p udp --sport 2313 -j ACCEPT
+
+    # IMAP
+    $iptables -A INPUT -i $inet -p tcp --dport 143 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 143 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 143 -j ACCEPT
+ 
+    # IPP - Protocolo de Impressão na Internet
+    #$iptables -A INPUT -i $ilan -p tcp --dport 631 -j ACCEPT
+    #$iptables -A INPUT -i $ilan -p udp -m multiport --dports 138,631 -j ACCEPT
+ 
+    # IRC - Internet Relay Chat
+    #$iptables -A INPUT -i $inet -p tcp --sport 6667 -j ACCEPT
+    #$iptables -A FORWARD -i $inet -p tcp --sport 6667 -j ACCEPT
+    #$iptables -A FORWARD -o $inet -p tcp --dport 6667 -j ACCEPT
+ 
+    # Microsoft-DS - Serviços de Diretório da Microsoft
+    #$iptables -A INPUT -i $ilan -p tcp --dport 445 -j ACCEPT
+    #$iptables -A INPUT -i $ilan -p tcp -m multiport --sports 139,445 -j ACCEPT
+ 
+    # MSNMS - Serviço de Mensageiro de Rede da Microsoft
+    #$iptables -A INPUT -i $inet -p tcp -m multiport --sports 1863,1900 -j ACCEPT
+    #$iptables -A INPUT -i $inet -p udp --sport 1900 -j ACCEPT
+    #$iptables -A FORWARD -i $inet -p tcp -m multiport --sports 1863,7001 -j ACCEPT
+    #$iptables -A FORWARD -i $inet -p udp --sport 7001 -j ACCEPT
+    #$iptables -A FORWARD -o $inet -p tcp -m multiport --dports 1863,7001 -j ACCEPT
+    #$iptables -A FORWARD -o $inet -p udp --dport 7001 -j ACCEPT
+ 
+    # NETBIOS-SSN - Serviço de Sessão NetBIOS
+    #$iptables -A INPUT -i $ilan -p udp -m multiport --dports 137,138 -j ACCEPT
+    #$iptables -A INPUT -i $ilan -p tcp --dport 139 -j ACCEPT
+ 
+    # NO-IP - Provedor de DNS Dinâmico
+    $iptables -A INPUT -i $inet -p tcp --sport 8245 -j ACCEPT
+ 
+    # NTP - Protocolo para sincronização dos relógios
+    #$iptables -A INPUT -i $inet -p udp --sport 123 -j ACCEPT
+    #$iptables -A FORWARD -i $inet -p udp --sport 123 -j ACCEPT
+    #$iptables -A FORWARD -o $inet -p udp --dport 123 -j ACCEPT
+ 
+    # POP3S - Protocolo de Correio Seguro
+    $iptables -A INPUT -i $inet -p tcp --sport 995 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 995 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 995 -j ACCEPT
+
+    $iptables -A INPUT -i $inet -p tcp --sport 993 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 993 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 993 -j ACCEPT
+ 
+    # SSDP - Protocolo para Descoberta de Serviços Simples
+    #$iptables -A INPUT -i $ilan -p udp --dport 1900 -j ACCEPT
+ 
+    # SSH - Shell Seguro
+    $iptables -A INPUT -p tcp --sport 22 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 22 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 22 -j ACCEPT
+ 
+    # SSMTP - Protocolo Simples para Transferência de Correio Seguro
+    $iptables -A INPUT -i $inet -p tcp -m multiport --sports 465,587 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 465 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 465 -j ACCEPT
+
+    $iptables -A FORWARD -i $inet -p tcp --sport 587 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 587 -j ACCEPT
+ 
+    # TELNET
+    $iptables -A INPUT -p tcp --sport 23 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 23 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 23 -j ACCEPT
+ 
+    # VNC - Computação em Rede Virtual
+    $iptables -A INPUT -p tcp --sport 5900 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 5900 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 5900 -j ACCEPT
+ 
+    # XMPP - Protocolo de Presença e Mensagens Extensiva
+    #$iptables -A INPUT -i $inet -p tcp --sport 5222 -j ACCEPT
+    #$iptables -A FORWARD -i $inet -p tcp --sport 5222 -j ACCEPT
+    #$iptables -A FORWARD -o $inet -p tcp --dport 5222 -j ACCEPT
+
+    # Email Grupo CBM
+    $iptables -A FORWARD -p TCP -s 192.168.0.0/24 --dport 25 -j ACCEPT
+    $iptables -A FORWARD -p TCP -s 192.168.0.0/24 --dport 110 -j ACCEPT
+    $iptables -A FORWARD -p tcp --sport 25 -j ACCEPT
+    $iptables -A FORWARD -p tcp --sport 110 -j ACCEPT 
+
+    $iptables -A FORWARD -p tcp -s 192.168.0.0/24 --dport 587 -j ACCEPT
+    $iptables -A FORWARD -p tcp --sport 587 -j ACCEPT
+
+    # ----------------------------------------------------------
+    # GAM 57 / Sintegra / ISS / VAF / DAMEF / DIRF
+    # ----------------------------------------------------------
+    $iptables -A INPUT -i $inet -p tcp --dport 8017 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 8017 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 8017 -j ACCEPT
+
+    $iptables -A INPUT -i $inet -p tcp --dport 5017 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 5017 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 5017 -j ACCEPT
+
+    $iptables -A INPUT -i $inet -p tcp --dport 5022
+    $iptables -A FORWARD -i $inet -p tcp --sport 5022 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 5022 -j ACCEPT
+
+    # ----------------------------------------------------------
+    # DAPI
+    # ----------------------------------------------------------
+    $iptables -A INPUT -i $inet -p tcp --dport 3050 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 3050 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 3050 -j ACCEPT
+
+    # ----------------------------------------------------------
+    # Receita Federal -> SPED / DACOM / DCTF / ITR / Mapas / IRPF
+    # ----------------------------------------------------------
+    $iptables -A INPUT -i $inet -p tcp --dport 3456 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 3456 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 3456 -j ACCEPT
+
+    # ----------------------------------------------------------
+    # RAIS -> 161.148.185.46
+    # ----------------------------------------------------------
+    $iptables -A INPUT -i $inet -p tcp --dport 3007 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 3007 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 3007 -j ACCEPT
+
+    # ----------------------------------------------------------
+    # SEFIP
+    # ----------------------------------------------------------
+    $iptables -A INPUT -i $inet -p tcp --dport 2631 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 2631 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 2631 -j ACCEPT
+
+    # ----------------------------------------------------------
+    # SIGOV
+    # ----------------------------------------------------------
+    $iptables -A INPUT -i $inet -p tcp --dport 1494 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 1494 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 1494 -j ACCEPT
+
+    # ----------------------------------------------------------
+    #Conectividade Social
+    # ----------------------------------------------------------
+    $iptables -A FORWARD -p tcp --dport 2631 -j ACCEPT
+    $iptables -A FORWARD -p udp --dport 2631 -j ACCEPT
+
+    # ----------------------------------------------------------
+    # Emesene
+    # ----------------------------------------------------------
+    $iptables -A INPUT -i $inet -p tcp --dport 1863 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 1863 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 1863 -j ACCEPT
+
+    $iptables -A INPUT -i $ilan -p tcp --dport 1863 -j ACCEPT
+    $iptables -A FORWARD -i $ilan -p tcp --dport 1863 -j ACCEPT
+    $iptables -A FORWARD -i $ilan -p tcp --dport 1863 -j ACCEPT
+
+    #-----------------------------------------------------------
+    # Heringer
+    #-----------------------------------------------------------
+    $iptables -A INPUT -i $inet -p tcp --dport 1494 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 50 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 50 -j ACCEPT
+    
+    $iptables -A INPUT -i $inet -p tcp --dport 51 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p tcp --sport 51 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p tcp --dport 51 -j ACCEPT
+
+    $iptables -A INPUT -i $inet -p udp --dport 500 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p udp --sport 500 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p udp --dport 500 -j ACCEPT
+
+    $iptables -A INPUT -i $inet -p udp --dport 4500 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p udp --sport 4500 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p udp --dport 4500 -j ACCEPT
+
+    # Webmin
+    $iptables -A INPUT -i $inet -p udp --dport 10000 -j ACCEPT
+    $iptables -A FORWARD -i $inet -p udp --sport 10000 -j ACCEPT
+    $iptables -A FORWARD -o $inet -p udp --dport 10000 -j ACCEPT
+    
+    # LOGs
+    $iptables -A INPUT -p tcp -m multiport ! --dports 0:1056 -j DROP
+    $iptables -A INPUT -p udp -j DROP
+    $iptables -A INPUT -m limit --limit 3/m --limit-burst 3 -j LOG --log-prefix "LOG-FW: "
+ 
+    $iptables -t mangle -A FORWARD -o $inet -p tcp --tcp-flags SYN,RST SYN -m tcpmss --mss 1400:1536 -j TCPMSS --clamp-mss-to-pmtu
+}
+ 
+do_stop () {
+    # Política
+    $iptables -P INPUT DROP
+    $iptables -P OUTPUT DROP
+    $iptables -P FORWARD DROP
+}
+ 
+case "$1" in
+    start)
+        log_daemon_msg "Iniciando Firewall"
+        do_start
+        log_end_msg $?
+        ;;
+    stop)
+        log_daemon_msg "Parando Firewall"
+        do_stop
+        log_end_msg $?
+        ;;
+    reload)
+        log_action_begin_msg "Reconfigurando Firewall..."
+        echo "Reconfigurando Firewall."
+        do_start
+        log_action_end_msg $?
+        ;;
+    *)
+        log_success_msg "Usage: $0 {start|stop|reload}"
+        exit 1
+esac
+ 
+exit 0 
